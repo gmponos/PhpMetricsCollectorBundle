@@ -1,164 +1,129 @@
 <?php
-namespace Hal\Bundle\PhpMetricsCollector\Collector;
 
-use Hal\Component\Token\Tokenizer;
-use Hal\Component\Token\TokenType;
-use Hal\Metrics\Complexity\Component\McCabe\McCabe;
-use Hal\Metrics\Complexity\Text\Halstead\Halstead;
-use Hal\Metrics\Complexity\Text\Length\Loc;
-use Hal\Metrics\Design\Component\MaintainabilityIndex\MaintainabilityIndex;
+namespace App\Collector;
+
+use App\Metric\FinalVisitor;
+use Exception;
+use Hal\Metric\Class_\ClassEnumVisitor;
+use Hal\Metric\Class_\Complexity\CyclomaticComplexityVisitor;
+use Hal\Metric\Class_\Complexity\KanDefectVisitor;
+use Hal\Metric\Class_\Component\MaintainabilityIndexVisitor;
+use Hal\Metric\Class_\Coupling\ExternalsVisitor;
+use Hal\Metric\Class_\Structural\LcomVisitor;
+use Hal\Metric\Class_\Structural\SystemComplexityVisitor;
+use Hal\Metric\Class_\Text\HalsteadVisitor;
+use Hal\Metric\Class_\Text\LengthVisitor;
+use Hal\Metric\ClassMetric;
+use Hal\Metric\Consolidated;
+use Hal\Metric\Metrics;
+use Hal\Metric\Package\PackageCollectingVisitor;
+use Hal\Violation\ViolationParser;
+use PhpParser\Lexer\Emulative;
+use PhpParser\NodeTraverser;
+use PhpParser\NodeVisitor\NameResolver;
+use PhpParser\Parser\Php7;
+use Symfony\Component\Finder\Finder;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\DataCollector\DataCollector;
+use Symfony\Component\HttpKernel\DataCollector\LateDataCollectorInterface;
 
-class PhpMetricsCollector extends DataCollector
+class PhpMetricsCollector extends DataCollector implements LateDataCollectorInterface
 {
-    public function collect(Request $request, Response $response, \Exception $exception = null)
-    {
+    /**
+     * @var string
+     */
+    private $path;
 
-        // filter loaded files
-        $files = get_included_files();
-        $files = array_filter($files, function ($v) {
-            $excludes = array('vendor', 'pear', '\\.phar', 'bootstrap\.php', 'Test', '/app', 'AppKernel.php', 'autoload.php', 'cache/', 'app.php', 'app_dev.php', 'Form', 'PhpMetrics', 'classes.php');
-            return !preg_match('!' . implode('|', $excludes) . '!', $v);
+    public function __construct(string $path)
+    {
+        $this->path = $path . '/src';
+    }
+
+    public function collect(Request $request, Response $response, Exception $exception = null)
+    {
+    }
+
+    public function getAverage()
+    {
+        return $this->data['consolidated']->getAvg();
+    }
+
+    public function getSum()
+    {
+        return $this->data['consolidated']->getSum();
+    }
+
+    public function getMetrics()
+    {
+        return $this->data['metrics'];
+    }
+
+    public function getClassMetrics()
+    {
+        return array_filter($this->data['metrics']->all(), function ($el) {
+            return $el instanceof ClassMetric;
         });
-
-        // Prepare datas
-        $all = $average = array(
-            'cfiles' => 0,
-            'maintainability' => array(),
-            'commentWeight' => array(),
-            'complexity' => array(),
-            'loc' => array(),
-            'lloc' => array(),
-            'cloc' => array(),
-            'bugs' => array(),
-            'difficulty' => array(),
-            'intelligentContent' => array(),
-            'vocabulary' => array(),
-        );
-        $scoreByFile = array();
-
-        // group files into tmp folder
-        $folder = sys_get_temp_dir() . DIRECTORY_SEPARATOR . uniqid();
-        mkdir($folder);
-        foreach ($files as $file) {
-            // run PhpMetrics
-            $tokenizer = new Tokenizer();
-            $tokenType = new TokenType();
-
-            // halstead
-            $halstead = new Halstead($tokenizer, $tokenType);
-            $rHalstead = $halstead->calculate($file);
-
-            // loc
-            $loc = new Loc($tokenizer);
-            $rLoc = $loc->calculate($file);
-
-            // complexity
-            $complexity = new McCabe($tokenizer);
-            $rComplexity = $complexity->calculate($file);
-
-            // maintainability
-            $maintainability = new MaintainabilityIndex();
-            $rMaintenability = $maintainability->calculate($rHalstead, $rLoc, $rComplexity);
-
-            // store result
-            $files[$file] = array();
-            $all['cfiles']++;
-            $all['maintainability'][] = $scoreByFile[$file]['maintainability'] = $rMaintenability->getMaintainabilityIndex();
-            $all['commentWeight'][] = $scoreByFile[$file]['commentWeight'] = $rMaintenability->getCommentWeight();
-            $all['complexity'][] = $scoreByFile[$file]['complexity'] = $rComplexity->getCyclomaticComplexityNumber();
-            $all['loc'][] = $scoreByFile[$file]['loc'] = $rLoc->getLoc();
-            $all['lloc'][] = $scoreByFile[$file]['lloc'] = $rLoc->getLogicalLoc();
-            $all['cloc'][] = $scoreByFile[$file]['cloc'] = $rLoc->getCommentLoc();
-            $all['bugs'][] = $scoreByFile[$file]['bugs'] = $rHalstead->getBugs();
-            $all['difficulty'][] = $scoreByFile[$file]['difficulty'] = $rHalstead->getDifficulty();
-            $all['intelligentContent'][] = $scoreByFile[$file]['intelligentContent'] = $rHalstead->getIntelligentContent();
-            $all['vocabulary'][] = $scoreByFile[$file]['vocabulary'] = $rHalstead->getVocabulary();
-        }
-
-        // average
-        if ($all['cfiles'] > 0) {
-            $average['maintainability'] = array_sum($all['maintainability']) / sizeof($all['maintainability']);
-            $average['commentWeight'] = array_sum($all['commentWeight']) / sizeof($all['commentWeight']);
-            $average['complexity'] = array_sum($all['complexity']) / sizeof($all['complexity']);
-            $average['loc'] = array_sum($all['loc']);
-            $average['lloc'] = array_sum($all['lloc']);
-            $average['cloc'] = array_sum($all['cloc']);
-            $average['bugs'] = array_sum($all['bugs']) / sizeof($all['bugs']);
-            $average['difficulty'] = array_sum($all['difficulty']) / sizeof($all['difficulty']);
-            $average['intelligentContent'] = array_sum($all['intelligentContent']) / sizeof($all['intelligentContent']);
-            $average['vocabulary'] = array_sum($all['vocabulary']) / sizeof($all['vocabulary']);
-        }
-        $this->data = array(
-            'average' => $average,
-            'cfiles' => $all['cfiles'],
-            'files' => $scoreByFile
-        );
-    }
-
-    public function getMaintainabilityIndex()
-    {
-        return $this->data['average']['maintainability'];
-    }
-
-    public function getComplexity()
-    {
-        return $this->data['average']['complexity'];
-    }
-
-    public function getCommentWeight()
-    {
-        return $this->data['average']['commentWeight'];
-    }
-
-    public function getLoc()
-    {
-        return $this->data['average']['loc'];
-    }
-
-    public function getLogicalLoc()
-    {
-        return $this->data['average']['lloc'];
-    }
-
-    public function getCommentLoc()
-    {
-        return $this->data['average']['cloc'];
-    }
-
-    public function getBugs()
-    {
-        return $this->data['average']['bugs'];
-    }
-
-    public function getDifficulty()
-    {
-        return $this->data['average']['difficulty'];
-    }
-
-    public function getIntelligentContent()
-    {
-        return $this->data['average']['intelligentContent'];
-    }
-
-    public function getVocabulary()
-    {
-        return $this->data['average']['vocabulary'];
-    }
-
-    public function getNumberOfFiles()
-    {
-        return $this->data['cfiles'];
-    }
-
-    public function getFiles() {
-        return $this->data['files'];
     }
 
     public function getName()
     {
         return 'phpmetrics_collector';
+    }
+
+    public function reset()
+    {
+        // TODO: Implement reset() method.
+    }
+
+    /**
+     * Collects data as late as possible.
+     */
+    public function lateCollect()
+    {
+        $finder = new Finder();
+        $files = $finder->files()->in($this->path)->name('*.php');
+
+        $metrics = new Metrics();
+        $metrics->all();
+
+        $parser = new Php7(new Emulative());
+
+        $traverser = new NodeTraverser();
+        $traverser->addVisitor(new NameResolver());
+        $traverser->addVisitor(new ClassEnumVisitor($metrics));
+        $traverser->addVisitor(new FinalVisitor($metrics));
+        $traverser->addVisitor(new CyclomaticComplexityVisitor($metrics));
+        $traverser->addVisitor(new ExternalsVisitor($metrics));
+        $traverser->addVisitor(new LcomVisitor($metrics));
+        $traverser->addVisitor(new HalsteadVisitor($metrics));
+        $traverser->addVisitor(new LengthVisitor($metrics));
+        $traverser->addVisitor(new CyclomaticComplexityVisitor($metrics));
+        $traverser->addVisitor(new MaintainabilityIndexVisitor($metrics));
+        $traverser->addVisitor(new KanDefectVisitor($metrics));
+        $traverser->addVisitor(new SystemComplexityVisitor($metrics));
+        $traverser->addVisitor(new PackageCollectingVisitor($metrics));
+
+        foreach ($files as $file) {
+            $code = file_get_contents($file);
+            $stmts = $parser->parse($code);
+            $traverser->traverse($stmts);
+        }
+        // violations
+        (new ViolationParser())->apply($metrics);
+
+        $this->data['consolidated'] = new Consolidated($metrics);
+        $this->data['metrics'] = $metrics;
+        $classMetrics = $this->getClassMetrics();
+        $finals = array_filter($classMetrics, function (ClassMetric $classMetric) {
+            return $classMetric->get('final') === true;
+        });
+
+        $this->data['final'] = count($finals) . "/" . count($classMetrics);
+    }
+
+    public function getFinal()
+    {
+        return $this->data['final'];
     }
 }
